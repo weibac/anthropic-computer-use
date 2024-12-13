@@ -100,9 +100,6 @@ async def sampling_loop(
         text=f"{SYSTEM_PROMPT}{' ' + system_prompt_suffix if system_prompt_suffix else ''}",
     )
 
-    # if only_n_most_recent_messages == -1:
-    #     only_n_most_recent_messages = None
-
     while True:
         enable_prompt_caching = False
         betas = [COMPUTER_USE_BETA_FLAG]
@@ -125,14 +122,6 @@ async def sampling_loop(
             system["cache_control"] = {"type": "ephemeral"}
         else:
             _remove_prompt_caching(messages)
-
-        # if only_n_most_recent_messages:
-        #     messages = messages[-only_n_most_recent_messages:]
-        #     # find the first message with no tool results
-        #     for message in messages:
-        #         if not any(isinstance(item, dict) and item.get("type") == "tool_result" for item in message["content"]):
-        #             break
-        #     messages = messages[:messages.index(message)]
 
         if only_n_most_recent_images:
             _maybe_filter_to_n_most_recent_images(

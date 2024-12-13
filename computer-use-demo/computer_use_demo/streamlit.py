@@ -52,9 +52,9 @@ STREAMLIT_STYLE = """
 
     /* Tertiary button */
     button[kind=tertiary] {
-        margin-top: -40px;
+        margin-top: -20px;
         margin-bottom: -10px;
-
+        margin-left: 10px;
     }
 
      /* Hide the streamlit deploy button */
@@ -317,6 +317,11 @@ async def main():
                     else:
                         st.error("Failed to load state!")
 
+            if st.session_state.last_saved_timestamp:
+                st.caption(
+                    f"Last saved: {st.session_state.last_saved_timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+
             # Delete state option
             if st.button("Delete Selected State", type="primary"):
                 try:
@@ -324,11 +329,6 @@ async def main():
                     st.success(f"Deleted '{selected_state}'!")
                 except Exception as e:
                     st.error(f"Failed to delete state: {e}")
-
-        if st.session_state.last_saved_timestamp:
-            st.caption(
-                f"Last saved: {st.session_state.last_saved_timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
 
         # Reset button in its own section
         st.divider()
@@ -358,33 +358,30 @@ async def main():
     with chat:
         total_messages = len(st.session_state.messages)
 
-        st.empty()
+        # st.empty()
         # render past chats
-        with st.container():
-            for idx, message in enumerate(st.session_state.messages):
-                if is_message_visible(idx, total_messages):
-                    index = None if idx == len(st.session_state.messages) - 1 else idx
-                    if isinstance(message["content"], str):
-                        _render_message(message["role"], message["content"], index)
-                    elif isinstance(message["content"], list):
-                        for block in message["content"]:
-                            # the tool result we send back to the Anthropic API isn't sufficient to render all details,
-                            # so we store the tool use responses
-                            if (
-                                isinstance(block, dict)
-                                and block["type"] == "tool_result"
-                            ):
-                                _render_message(
-                                    Sender.TOOL,
-                                    st.session_state.tools[block["tool_use_id"]],
-                                    index,
-                                )
-                            else:
-                                _render_message(
-                                    message["role"],
-                                    cast(BetaContentBlockParam | ToolResult, block),
-                                    index,
-                                )
+        # with st.container():
+        for idx, message in enumerate(st.session_state.messages):
+            if is_message_visible(idx, total_messages):
+                index = None if idx == len(st.session_state.messages) - 1 else idx
+                if isinstance(message["content"], str):
+                    _render_message(message["role"], message["content"], index)
+                elif isinstance(message["content"], list):
+                    for block in message["content"]:
+                        # the tool result we send back to the Anthropic API isn't sufficient to render all details,
+                        # so we store the tool use responses
+                        if isinstance(block, dict) and block["type"] == "tool_result":
+                            _render_message(
+                                Sender.TOOL,
+                                st.session_state.tools[block["tool_use_id"]],
+                                index,
+                            )
+                        else:
+                            _render_message(
+                                message["role"],
+                                cast(BetaContentBlockParam | ToolResult, block),
+                                index,
+                            )
 
         # render past http exchanges
         if st.session_state.render_api_responses:
