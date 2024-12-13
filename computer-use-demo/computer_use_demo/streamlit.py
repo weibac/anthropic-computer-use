@@ -49,6 +49,14 @@ STREAMLIT_STYLE = """
     button[kind=header]:hover {
         background-color: rgb(255, 51, 51);
     }
+
+    /* Tertiary button */
+    button[kind=tertiary] {
+        margin-top: -40px;
+        margin-bottom: -10px;
+
+    }
+
      /* Hide the streamlit deploy button */
     .stAppDeployButton {
         visibility: hidden;
@@ -104,7 +112,6 @@ def time_decorator(func):
 # @time_decorator
 def get_state_name():
     """Get state name input without triggering heavy operations"""
-    logger.info("Starting get_state_name")
 
     with st.sidebar:
         with st.container():
@@ -113,7 +120,6 @@ def get_state_name():
                 key="state_name_input",
                 on_change=None,  # Disable automatic callbacks
             )
-            # logger.info(f"State name input value: {result}")
             return result
 
 
@@ -300,21 +306,19 @@ async def main():
         saved_states = get_saved_states()
         if saved_states:
             st.write("Load saved state:")
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                selected_state = st.selectbox(
-                    "Select state to load", saved_states, label_visibility="collapsed"
-                )
-            with col2:
-                if st.button("Load", type="primary"):
-                    with st.spinner("Loading state..."):
-                        if load_state_with_name(selected_state):
-                            st.success(f"Loaded '{selected_state}'!")
-                        else:
-                            st.error("Failed to load state!")
+
+            selected_state = st.selectbox(
+                "Select state to load", saved_states, label_visibility="collapsed"
+            )
+            if st.button("Load", type="secondary", key="load_state_button"):
+                with st.spinner("Loading state..."):
+                    if load_state_with_name(selected_state):
+                        st.success(f"Loaded '{selected_state}'!")
+                    else:
+                        st.error("Failed to load state!")
 
             # Delete state option
-            if st.button("Delete Selected State", type="secondary"):
+            if st.button("Delete Selected State", type="primary"):
                 try:
                     (CONFIG_DIR / f"state_{selected_state}.json").unlink()
                     st.success(f"Deleted '{selected_state}'!")
@@ -354,39 +358,39 @@ async def main():
     with chat:
         total_messages = len(st.session_state.messages)
 
-        # logger.info(f"\nTotal messages: {total_messages}")
-
-        # # Show message count if some are hidden
-        # if total_messages > 10:
-        #     st.caption(f"Showing most recent 10 of {total_messages} messages")
-
-        # with st.container():
-        for idx, message in enumerate(st.session_state.messages):
-            if is_message_visible(idx, total_messages):
-                if isinstance(message["content"], str):
-                    _render_message(message["role"], message["content"])
-                elif isinstance(message["content"], list):
-                    for block in message["content"]:
-                        # the tool result we send back to the Anthropic API isn't sufficient to render all details,
-                        # so we store the tool use responses
-                        if isinstance(block, dict) and block["type"] == "tool_result":
-                            _render_message(
-                                Sender.TOOL,
-                                st.session_state.tools[block["tool_use_id"]],
-                            )
-                        else:
-                            _render_message(
-                                message["role"],
-                                cast(BetaContentBlockParam | ToolResult, block),
-                            )
+        st.empty()
+        # render past chats
+        with st.container():
+            for idx, message in enumerate(st.session_state.messages):
+                if is_message_visible(idx, total_messages):
+                    index = None if idx == len(st.session_state.messages) - 1 else idx
+                    if isinstance(message["content"], str):
+                        _render_message(message["role"], message["content"], index)
+                    elif isinstance(message["content"], list):
+                        for block in message["content"]:
+                            # the tool result we send back to the Anthropic API isn't sufficient to render all details,
+                            # so we store the tool use responses
+                            if (
+                                isinstance(block, dict)
+                                and block["type"] == "tool_result"
+                            ):
+                                _render_message(
+                                    Sender.TOOL,
+                                    st.session_state.tools[block["tool_use_id"]],
+                                    index,
+                                )
+                            else:
+                                _render_message(
+                                    message["role"],
+                                    cast(BetaContentBlockParam | ToolResult, block),
+                                    index,
+                                )
 
         # render past http exchanges
-        # if http_logs.id == st.tabs(['Chat', 'HTTP Exchange Logs'])[1].id:
         if st.session_state.render_api_responses:
             for identity, (request, response) in st.session_state.responses.items():
                 _render_api_response(request, response, identity, http_logs)
 
-        # render past chats
         if new_message:
             st.session_state.messages.append(
                 {
@@ -407,10 +411,6 @@ async def main():
         if most_recent_message["role"] is not Sender.USER:
             # we don't have a user message to respond to, exit early
             return
-
-        logger.info(
-            f"N most recent images: {st.session_state.only_n_most_recent_images}"
-        )
 
         with track_sampling_loop():
             # run the agent sampling loop with the newest message
@@ -616,14 +616,11 @@ def _render_error(error: Exception):
 def _render_message(
     sender: Sender,
     message: str | BetaContentBlockParam | ToolResult,
+    idx: int | None = None,
 ):
     """Convert input from the user or output from the agent to a streamlit message."""
 
-    # @st.cache_data(show_spinner=False)
-    # def render_cached_message(sender, message_hash, message):
-    #     with st.chat_message(sender):
-
-    # # streamlit's hotreloading breaks isinstance checks, so we need to check for class names
+    # streamlit's hotreloading breaks isinstance checks, so we need to check for class names
     is_tool_result = not isinstance(message, str | dict)
     if not message or (
         is_tool_result
@@ -632,6 +629,7 @@ def _render_message(
         and not hasattr(message, "output")
     ):
         return
+    show_rewind_button = False
     with st.chat_message(sender):
         if is_tool_result:
             message = cast(ToolResult, message)
@@ -647,6 +645,8 @@ def _render_message(
         elif isinstance(message, dict):
             if message["type"] == "text":
                 st.write(message["text"])
+                if not message["text"] == INTERRUPT_TEXT:
+                    show_rewind_button = True
             elif message["type"] == "tool_use":
                 st.code(f'Tool Use: {message["name"]}\nInput: {message["input"]}')
             else:
@@ -654,34 +654,26 @@ def _render_message(
                 raise Exception(f'Unexpected response type {message["type"]}')
         else:
             st.markdown(message)
+            show_rewind_button = True
 
-    # @st.cache_data(show_spinner=False)
-    # def render_cached_message(sender, message_hash, message):
-    #     with st.chat_message(sender):
-    #         if is_tool_result:
-    #             message = cast(ToolResult, message)
-    #             if message.output:
-    #                 if message.__class__.__name__ == "CLIResult":
-    #                     st.code(message.output)
-    #                 else:
-    #                     st.markdown(message.output)
-    #             if message.error:
-    #                 st.error(message.error)
-    #             if message.base64_image and not st.session_state.hide_images:
-    #                 st.image(base64.b64decode(message.base64_image))
-    #         elif isinstance(message, dict):
-    #             if message["type"] == "text":
-    #                 st.write(message["text"])
-    #             elif message["type"] == "tool_use":
-    #                 st.code(f'Tool Use: {message["name"]}\nInput: {message["input"]}')
-    #             else:
-    #                 # only expected return types are text and tool_use
-    #                 raise Exception(f'Unexpected response type {message["type"]}')
-    #         else:
-    #             st.markdown(message)
-    #     # Create a hash of the message content for caching
-    # message_hash = hash(str(message))
-    # render_cached_message(sender, message_hash, message)
+    if idx and show_rewind_button:
+        if st.button(
+            "↺", key=f"rewind_{idx}", help="Rewind to this message", type="tertiary"
+        ):
+            st.session_state.messages = st.session_state.messages[: idx + 1]
+            st.session_state.tools = {
+                k: v
+                for k, v in st.session_state.tools.items()
+                if any(
+                    block.get("tool_use_id") == k
+                    for msg in st.session_state.messages
+                    for block in (
+                        msg["content"] if isinstance(msg["content"], list) else []
+                    )
+                    if isinstance(block, dict)
+                )
+            }
+            st.rerun()
 
 
 def get_saved_states() -> list[str]:
