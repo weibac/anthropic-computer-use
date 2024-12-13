@@ -149,6 +149,8 @@ def setup_state():
         st.session_state.auth_validated = False
     if "responses" not in st.session_state:
         st.session_state.responses = {}
+    if "prompt_caching" not in st.session_state:
+        st.session_state.prompt_caching = False
     if "only_n_most_recent_images" not in st.session_state:
         st.session_state.only_n_most_recent_images = 3
     if "only_n_most_recent_messages" not in st.session_state:
@@ -224,11 +226,19 @@ async def main():
                 "system_prompt", st.session_state.custom_system_prompt
             ),
         )
+        if st.session_state.provider == APIProvider.ANTHROPIC:
+            st.checkbox(
+                "Cache prompt",
+                key="prompt_caching",
+                help="Use prompt caching. Only available for Anthropic API.",
+            )
         st.number_input(
             "Only send N most recent images",
             min_value=0,
             key="only_n_most_recent_images",
-            help="To decrease the total tokens sent, remove older screenshots from the conversation",
+            help="To decrease the total tokens sent, remove older screenshots from the conversation. Only available if prompt caching is disabled.",
+            disabled=st.session_state.provider == APIProvider.ANTHROPIC
+            and st.session_state.prompt_caching,
         )
         # st.number_input(
         #     "Only send N most recent messages",
@@ -398,6 +408,10 @@ async def main():
             # we don't have a user message to respond to, exit early
             return
 
+        logger.info(
+            f"N most recent images: {st.session_state.only_n_most_recent_images}"
+        )
+
         with track_sampling_loop():
             # run the agent sampling loop with the newest message
             # st.session_state.messages = st.session_state.messages[-st.session_state.only_n_most_recent_messages:]
@@ -417,7 +431,8 @@ async def main():
                 ),
                 api_key=st.session_state.api_key,
                 only_n_most_recent_images=st.session_state.only_n_most_recent_images,
-                only_n_most_recent_messages=st.session_state.only_n_most_recent_messages,
+                prompt_caching=st.session_state.prompt_caching,
+                # only_n_most_recent_messages=st.session_state.only_n_most_recent_messages,
             )
 
 

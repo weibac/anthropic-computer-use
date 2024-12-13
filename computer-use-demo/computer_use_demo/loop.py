@@ -83,7 +83,8 @@ async def sampling_loop(
     ],
     api_key: str,
     only_n_most_recent_images: int | None = None,
-    only_n_most_recent_messages: int | None = None,
+    # only_n_most_recent_messages: int | None = None,
+    prompt_caching: bool = False,
     max_tokens: int = 4096,
 ):
     """
@@ -99,8 +100,8 @@ async def sampling_loop(
         text=f"{SYSTEM_PROMPT}{' ' + system_prompt_suffix if system_prompt_suffix else ''}",
     )
 
-    if only_n_most_recent_messages == -1:
-        only_n_most_recent_messages = None
+    # if only_n_most_recent_messages == -1:
+    #     only_n_most_recent_messages = None
 
     while True:
         enable_prompt_caching = False
@@ -108,7 +109,8 @@ async def sampling_loop(
         image_truncation_threshold = only_n_most_recent_images or 0
         if provider == APIProvider.ANTHROPIC:
             client = Anthropic(api_key=api_key, max_retries=4)
-            enable_prompt_caching = True
+            if prompt_caching:
+                enable_prompt_caching = True
         elif provider == APIProvider.VERTEX:
             client = AnthropicVertex()
         elif provider == APIProvider.BEDROCK:
@@ -121,6 +123,8 @@ async def sampling_loop(
             # ever sensible to break the cache by truncating images
             only_n_most_recent_images = 0
             system["cache_control"] = {"type": "ephemeral"}
+        else:
+            _remove_prompt_caching(messages)
 
         # if only_n_most_recent_messages:
         #     messages = messages[-only_n_most_recent_messages:]
@@ -273,6 +277,16 @@ def _inject_prompt_caching(
                 content[-1].pop("cache_control", None)
                 # we'll only every have one extra turn per loop
                 break
+
+
+def _remove_prompt_caching(
+    messages: list[BetaMessageParam],
+):
+    for message in messages:
+        if message["role"] == "user" and isinstance(
+            content := message["content"], list
+        ):
+            content[-1].pop("cache_control", None)
 
 
 def _make_api_tool_result(
