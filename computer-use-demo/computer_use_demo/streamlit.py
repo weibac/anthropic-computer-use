@@ -216,7 +216,14 @@ async def main():
                 key="api_key",
                 on_change=lambda: save_to_storage("api_key", st.session_state.api_key),
             )
-
+        st.text_area(
+            "Custom System Prompt Suffix",
+            key="custom_system_prompt",
+            help="Additional instructions to append to the system prompt. see computer_use_demo/loop.py for the base system prompt.",
+            on_change=lambda: save_to_storage(
+                "system_prompt", st.session_state.custom_system_prompt
+            ),
+        )
         st.number_input(
             "Only send N most recent images",
             min_value=0,
@@ -239,14 +246,6 @@ async def main():
             "Render API Responses",
             key="render_api_responses",
             help="Render the API responses in the HTTP Exchange Logs tab (this is slow)",
-        )
-        st.text_area(
-            "Custom System Prompt Suffix",
-            key="custom_system_prompt",
-            help="Additional instructions to append to the system prompt. see computer_use_demo/loop.py for the base system prompt.",
-            on_change=lambda: save_to_storage(
-                "system_prompt", st.session_state.custom_system_prompt
-            ),
         )
         st.checkbox("Hide screenshots", key="hide_images")
 
@@ -671,10 +670,15 @@ def _render_message(
 
 
 def get_saved_states() -> list[str]:
-    """Get list of all saved state files"""
+    """Get list of all saved state files, sorted by modification time (newest first)"""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     files = glob.glob(str(CONFIG_DIR / "state_*.json"))
-    return sorted([Path(f).stem.replace("state_", "") for f in files])
+    # Create list of tuples with (filename, modification_time)
+    files_with_times = [(f, os.path.getmtime(f)) for f in files]
+    # Sort by modification time, newest first
+    sorted_files = sorted(files_with_times, key=lambda x: x[1], reverse=True)
+    # Extract just the state names from the sorted files
+    return [Path(f[0]).stem.replace("state_", "") for f in sorted_files]
 
 
 def load_state_with_name(name: str) -> bool:
