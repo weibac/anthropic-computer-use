@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from functools import partial
 from pathlib import PosixPath
-from typing import cast
+from typing import Any, Dict, cast
 
 import httpx
 import streamlit as st
@@ -55,6 +55,9 @@ WARNING_TEXT = "⚠️ Security Alert: Never provide access to sensitive account
 INTERRUPT_TEXT = "(user stopped or interrupted and wrote the following)"
 INTERRUPT_TOOL_ERROR = "human stopped or interrupted tool execution"
 
+CHAT_HISTORY_FILE = CONFIG_DIR / "chat_history.json"
+COMPUTER_STATE_FILE = CONFIG_DIR / "computer_state.json"
+
 
 class Sender(StrEnum):
     USER = "user"
@@ -64,7 +67,8 @@ class Sender(StrEnum):
 
 def setup_state():
     if "messages" not in st.session_state:
-        st.session_state.messages = []
+        # Load saved chat history if it exists
+        st.session_state.messages = load_from_storage_json("chat_history") or []
     if "api_key" not in st.session_state:
         # Try to load API key from file first, then environment
         st.session_state.api_key = load_from_storage("api_key") or os.getenv(
@@ -83,7 +87,22 @@ def setup_state():
     if "responses" not in st.session_state:
         st.session_state.responses = {}
     if "tools" not in st.session_state:
-        st.session_state.tools = {}
+        # Load saved tool state if it exists and convert back to ToolResult objects
+        loaded_data = load_from_storage_json("computer_state")
+        tools_data: Dict[str, Dict[str, Any]] = (
+            cast(Dict[str, Dict[str, Any]], loaded_data)
+            if isinstance(loaded_data, dict)
+            else {}
+        )
+        st.session_state.tools = {
+            tool_id: ToolResult(
+                output=data.get("output"),
+                error=data.get("error"),
+                base64_image=data.get("base64_image"),
+                system=data.get("system"),
+            )
+            for tool_id, data in tools_data.items()
+        }
     if "only_n_most_recent_images" not in st.session_state:
         st.session_state.only_n_most_recent_images = 3
     if "custom_system_prompt" not in st.session_state:
@@ -92,6 +111,8 @@ def setup_state():
         st.session_state.hide_images = False
     if "in_sampling_loop" not in st.session_state:
         st.session_state.in_sampling_loop = False
+    if "last_saved_timestamp" not in st.session_state:
+        st.session_state.last_saved_timestamp = None
 
 
 def _reset_model():
@@ -154,14 +175,35 @@ async def main():
         )
         st.checkbox("Hide screenshots", key="hide_images")
 
-        if st.button("Reset", type="primary"):
-            with st.spinner("Resetting..."):
-                st.session_state.clear()
-                setup_state()
+        st.divider()  # Add visual separation
 
-                subprocess.run("pkill Xvfb; pkill tint2", shell=True)  # noqa: ASYNC221
-                await asyncio.sleep(1)
-                subprocess.run("./start_all.sh", shell=True)  # noqa: ASYNC221
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Save State", type="secondary"):
+                with st.spinner("Saving state..."):
+                    save_chat_history()
+                    st.session_state.last_saved_timestamp = datetime.now()
+                st.success("State saved!")
+
+        with col2:
+            if st.button("Reset", type="primary"):
+                with st.spinner("Resetting..."):
+                    # Delete saved state files
+                    for filename in ["chat_history.json", "computer_state.json"]:
+                        try:
+                            (CONFIG_DIR / filename).unlink(missing_ok=True)
+                        except Exception as e:
+                            st.write(f"Debug: Error deleting {filename}: {e}")
+                    st.session_state.clear()
+                    setup_state()
+                    subprocess.run("pkill Xvfb; pkill tint2", shell=True)  # noqa: ASYNC221
+                    await asyncio.sleep(1)
+                    subprocess.run("./start_all.sh", shell=True)  # noqa: ASYNC221
+
+        if st.session_state.last_saved_timestamp:
+            st.caption(
+                f"Last saved: {st.session_state.last_saved_timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
 
     if not st.session_state.auth_validated:
         if auth_error := validate_auth(
@@ -320,6 +362,52 @@ def save_to_storage(filename: str, data: str) -> None:
         file_path.chmod(0o600)
     except Exception as e:
         st.write(f"Debug: Error saving {filename}: {e}")
+
+
+def load_from_storage_json(filename: str) -> dict | list | None:
+    """Load JSON data from a file in the storage directory."""
+    try:
+        file_path = CONFIG_DIR / f"{filename}.json"
+        if file_path.exists():
+            import json
+
+            with open(file_path) as f:
+                return json.load(f)
+    except Exception as e:
+        st.write(f"Debug: Error loading {filename}: {e}")
+    return None
+
+
+def save_to_storage_json(filename: str, data: dict | list) -> None:
+    """Save JSON data to a file in the storage directory."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        file_path = CONFIG_DIR / f"{filename}.json"
+        import json
+
+        with open(file_path, "w") as f:
+            json.dump(data, f)
+        # Ensure only user can read/write the file
+        file_path.chmod(0o600)
+    except Exception as e:
+        st.write(f"Debug: Error saving {filename}: {e}")
+
+
+def save_chat_history():
+    """Save the current chat history and tool state to disk"""
+    # Save messages as before
+    save_to_storage_json("chat_history", st.session_state.messages)
+
+    # Convert tool state to serializable format
+    serializable_tools = {}
+    for tool_id, tool_result in st.session_state.tools.items():
+        serializable_tools[tool_id] = {
+            "output": tool_result.output,
+            "error": tool_result.error,
+            "base64_image": tool_result.base64_image,
+            "system": tool_result.system,
+        }
+    save_to_storage_json("computer_state", serializable_tools)
 
 
 def _api_response_callback(
