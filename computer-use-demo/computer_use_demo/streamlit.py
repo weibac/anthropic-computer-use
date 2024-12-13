@@ -4,15 +4,20 @@ Entrypoint for streamlit, see https://docs.streamlit.io/
 
 import asyncio
 import base64
+import cProfile
+import glob
+import logging
 import os
+import pstats
 import subprocess
+import time
 import traceback
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from enum import StrEnum
-from functools import partial
-from pathlib import PosixPath
-from typing import Any, Dict, cast
+from functools import partial, wraps
+from pathlib import Path, PosixPath
+from typing import cast
 
 import httpx
 import streamlit as st
@@ -55,8 +60,61 @@ WARNING_TEXT = "⚠️ Security Alert: Never provide access to sensitive account
 INTERRUPT_TEXT = "(user stopped or interrupted and wrote the following)"
 INTERRUPT_TOOL_ERROR = "human stopped or interrupted tool execution"
 
-CHAT_HISTORY_FILE = CONFIG_DIR / "chat_history.json"
-COMPUTER_STATE_FILE = CONFIG_DIR / "computer_state.json"
+# Set up logging at the top of the file
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+def profile_decorator(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        profile = cProfile.Profile()
+        try:
+            return profile.runcall(func, *args, **kwargs)
+        finally:
+            stats = pstats.Stats(profile)
+            stats.sort_stats("cumulative")
+            # Create a string buffer to capture the output
+            import io
+
+            stream = io.StringIO()
+            stats.print_stats(20)  # Remove file parameter
+            output = stream.getvalue()
+            # Print to terminal
+            logger.info(f"\nProfile for {func.__name__}:\n{output}")
+
+    return wrapper
+
+
+def time_decorator(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        duration = time.perf_counter() - start
+        # Print to terminal
+        logger.info(f"{func.__name__} took {duration:.2f} seconds")
+        return result
+
+    return wrapper
+
+
+# @time_decorator
+def get_state_name():
+    """Get state name input without triggering heavy operations"""
+    logger.info("Starting get_state_name")
+
+    with st.sidebar:
+        with st.container():
+            result = st.text_input(
+                "State name",
+                key="state_name_input",
+                on_change=None,  # Disable automatic callbacks
+            )
+            # logger.info(f"State name input value: {result}")
+            return result
 
 
 class Sender(StrEnum):
@@ -65,10 +123,15 @@ class Sender(StrEnum):
     TOOL = "tool"
 
 
+# @time_decorator
 def setup_state():
+    """Initialize the session state with empty values"""
     if "messages" not in st.session_state:
-        # Load saved chat history if it exists
-        st.session_state.messages = load_from_storage_json("chat_history") or []
+        st.session_state.messages = []
+    if "tools" not in st.session_state:
+        st.session_state.tools = {}
+    if "last_saved_timestamp" not in st.session_state:
+        st.session_state.last_saved_timestamp = None
     if "api_key" not in st.session_state:
         # Try to load API key from file first, then environment
         st.session_state.api_key = load_from_storage("api_key") or os.getenv(
@@ -86,33 +149,20 @@ def setup_state():
         st.session_state.auth_validated = False
     if "responses" not in st.session_state:
         st.session_state.responses = {}
-    if "tools" not in st.session_state:
-        # Load saved tool state if it exists and convert back to ToolResult objects
-        loaded_data = load_from_storage_json("computer_state")
-        tools_data: Dict[str, Dict[str, Any]] = (
-            cast(Dict[str, Dict[str, Any]], loaded_data)
-            if isinstance(loaded_data, dict)
-            else {}
-        )
-        st.session_state.tools = {
-            tool_id: ToolResult(
-                output=data.get("output"),
-                error=data.get("error"),
-                base64_image=data.get("base64_image"),
-                system=data.get("system"),
-            )
-            for tool_id, data in tools_data.items()
-        }
     if "only_n_most_recent_images" not in st.session_state:
         st.session_state.only_n_most_recent_images = 3
+    if "only_n_most_recent_messages" not in st.session_state:
+        st.session_state.only_n_most_recent_messages = 500
+    if "visible_messages" not in st.session_state:
+        st.session_state.visible_messages = 20
     if "custom_system_prompt" not in st.session_state:
         st.session_state.custom_system_prompt = load_from_storage("system_prompt") or ""
     if "hide_images" not in st.session_state:
         st.session_state.hide_images = False
     if "in_sampling_loop" not in st.session_state:
         st.session_state.in_sampling_loop = False
-    if "last_saved_timestamp" not in st.session_state:
-        st.session_state.last_saved_timestamp = None
+    if "render_api_responses" not in st.session_state:
+        st.session_state.render_api_responses = False
 
 
 def _reset_model():
@@ -121,6 +171,14 @@ def _reset_model():
     ]
 
 
+def is_message_visible(idx: int, total_messages: int) -> bool:
+    """Show only the most recent N messages"""
+    if st.session_state.visible_messages == -1:
+        return True
+    return idx >= (total_messages - st.session_state.visible_messages)
+
+
+# @profile_decorator
 async def main():
     """Render loop for streamlit"""
     setup_state()
@@ -165,6 +223,23 @@ async def main():
             key="only_n_most_recent_images",
             help="To decrease the total tokens sent, remove older screenshots from the conversation",
         )
+        # st.number_input(
+        #     "Only send N most recent messages",
+        #     min_value=-1,
+        #     key="only_n_most_recent_messages",
+        #     help="To decrease the total tokens sent, remove older messages from the conversation",
+        # )
+        st.number_input(
+            "Only render N most recent messages",
+            min_value=-1,
+            key="visible_messages",
+            help="Only show the most recent N messages in the chat to decrease render time. Set to -1 to show all messages.",
+        )
+        st.checkbox(
+            "Render API Responses",
+            key="render_api_responses",
+            help="Render the API responses in the HTTP Exchange Logs tab (this is slow)",
+        )
         st.text_area(
             "Custom System Prompt Suffix",
             key="custom_system_prompt",
@@ -177,33 +252,81 @@ async def main():
 
         st.divider()  # Add visual separation
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Save State", type="secondary"):
-                with st.spinner("Saving state..."):
-                    save_chat_history()
-                    st.session_state.last_saved_timestamp = datetime.now()
-                st.success("State saved!")
+        # Save State Section
+        st.subheader("Save/Load State")
 
-        with col2:
-            if st.button("Reset", type="primary"):
-                with st.spinner("Resetting..."):
-                    # Delete saved state files
-                    for filename in ["chat_history.json", "computer_state.json"]:
-                        try:
-                            (CONFIG_DIR / filename).unlink(missing_ok=True)
-                        except Exception as e:
-                            st.write(f"Debug: Error deleting {filename}: {e}")
-                    st.session_state.clear()
-                    setup_state()
-                    subprocess.run("pkill Xvfb; pkill tint2", shell=True)  # noqa: ASYNC221
-                    await asyncio.sleep(1)
-                    subprocess.run("./start_all.sh", shell=True)  # noqa: ASYNC221
+        new_state_name = get_state_name()
+        if st.button(
+            "Save",
+            type="secondary",
+            disabled=not new_state_name,
+            key="save_state_button",
+        ):
+            try:
+                with st.spinner("Saving state..."):
+                    # Move the serialization logic inside the button click handler
+                    serializable_tools = {}
+                    for tool_id, tool_result in st.session_state.tools.items():
+                        serializable_tools[tool_id] = {
+                            "output": tool_result.output,
+                            "error": tool_result.error,
+                            "base64_image": tool_result.base64_image,
+                            "system": tool_result.system,
+                        }
+
+                    save_to_storage_json(
+                        f"state_{new_state_name}",
+                        {
+                            "messages": st.session_state.messages,
+                            "tools": serializable_tools,
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                    )
+                    st.session_state.last_saved_timestamp = datetime.now()
+                st.success(f"Saved as '{new_state_name}'!")
+            except Exception as e:
+                st.error(f"Error saving state: {str(e)}")
+
+        # Load existing state
+        saved_states = get_saved_states()
+        if saved_states:
+            st.write("Load saved state:")
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                selected_state = st.selectbox(
+                    "Select state to load", saved_states, label_visibility="collapsed"
+                )
+            with col2:
+                if st.button("Load", type="primary"):
+                    with st.spinner("Loading state..."):
+                        if load_state_with_name(selected_state):
+                            st.success(f"Loaded '{selected_state}'!")
+                        else:
+                            st.error("Failed to load state!")
+
+            # Delete state option
+            if st.button("Delete Selected State", type="secondary"):
+                try:
+                    (CONFIG_DIR / f"state_{selected_state}.json").unlink()
+                    st.success(f"Deleted '{selected_state}'!")
+                except Exception as e:
+                    st.error(f"Failed to delete state: {e}")
 
         if st.session_state.last_saved_timestamp:
             st.caption(
                 f"Last saved: {st.session_state.last_saved_timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
             )
+
+        # Reset button in its own section
+        st.divider()
+        if st.button("Reset Current Session", type="primary"):
+            with st.spinner("Resetting..."):
+                st.session_state.messages = []
+                st.session_state.tools = {}
+                st.session_state.last_saved_timestamp = None
+                subprocess.run("pkill Xvfb; pkill tint2", shell=True)  # noqa: ASYNC221
+                await asyncio.sleep(1)
+                subprocess.run("./start_all.sh", shell=True)  # noqa: ASYNC221
 
     if not st.session_state.auth_validated:
         if auth_error := validate_auth(
@@ -220,27 +343,39 @@ async def main():
     )
 
     with chat:
-        # render past chats
-        for message in st.session_state.messages:
-            if isinstance(message["content"], str):
-                _render_message(message["role"], message["content"])
-            elif isinstance(message["content"], list):
-                for block in message["content"]:
-                    # the tool result we send back to the Anthropic API isn't sufficient to render all details,
-                    # so we store the tool use responses
-                    if isinstance(block, dict) and block["type"] == "tool_result":
-                        _render_message(
-                            Sender.TOOL, st.session_state.tools[block["tool_use_id"]]
-                        )
-                    else:
-                        _render_message(
-                            message["role"],
-                            cast(BetaContentBlockParam | ToolResult, block),
-                        )
+        total_messages = len(st.session_state.messages)
+
+        # logger.info(f"\nTotal messages: {total_messages}")
+
+        # # Show message count if some are hidden
+        # if total_messages > 10:
+        #     st.caption(f"Showing most recent 10 of {total_messages} messages")
+
+        # with st.container():
+        for idx, message in enumerate(st.session_state.messages):
+            if is_message_visible(idx, total_messages):
+                if isinstance(message["content"], str):
+                    _render_message(message["role"], message["content"])
+                elif isinstance(message["content"], list):
+                    for block in message["content"]:
+                        # the tool result we send back to the Anthropic API isn't sufficient to render all details,
+                        # so we store the tool use responses
+                        if isinstance(block, dict) and block["type"] == "tool_result":
+                            _render_message(
+                                Sender.TOOL,
+                                st.session_state.tools[block["tool_use_id"]],
+                            )
+                        else:
+                            _render_message(
+                                message["role"],
+                                cast(BetaContentBlockParam | ToolResult, block),
+                            )
 
         # render past http exchanges
-        for identity, (request, response) in st.session_state.responses.items():
-            _render_api_response(request, response, identity, http_logs)
+        # if http_logs.id == st.tabs(['Chat', 'HTTP Exchange Logs'])[1].id:
+        if st.session_state.render_api_responses:
+            for identity, (request, response) in st.session_state.responses.items():
+                _render_api_response(request, response, identity, http_logs)
 
         # render past chats
         if new_message:
@@ -266,6 +401,7 @@ async def main():
 
         with track_sampling_loop():
             # run the agent sampling loop with the newest message
+            # st.session_state.messages = st.session_state.messages[-st.session_state.only_n_most_recent_messages:]
             st.session_state.messages = await sampling_loop(
                 system_prompt_suffix=st.session_state.custom_system_prompt,
                 model=st.session_state.model,
@@ -282,6 +418,7 @@ async def main():
                 ),
                 api_key=st.session_state.api_key,
                 only_n_most_recent_images=st.session_state.only_n_most_recent_images,
+                only_n_most_recent_messages=st.session_state.only_n_most_recent_messages,
             )
 
 
@@ -393,23 +530,7 @@ def save_to_storage_json(filename: str, data: dict | list) -> None:
         st.write(f"Debug: Error saving {filename}: {e}")
 
 
-def save_chat_history():
-    """Save the current chat history and tool state to disk"""
-    # Save messages as before
-    save_to_storage_json("chat_history", st.session_state.messages)
-
-    # Convert tool state to serializable format
-    serializable_tools = {}
-    for tool_id, tool_result in st.session_state.tools.items():
-        serializable_tools[tool_id] = {
-            "output": tool_result.output,
-            "error": tool_result.error,
-            "base64_image": tool_result.base64_image,
-            "system": tool_result.system,
-        }
-    save_to_storage_json("computer_state", serializable_tools)
-
-
+# @time_decorator
 def _api_response_callback(
     request: httpx.Request,
     response: httpx.Response | object | None,
@@ -424,7 +545,9 @@ def _api_response_callback(
     response_state[response_id] = (request, response)
     if error:
         _render_error(error)
-    _render_api_response(request, response, response_id, tab)
+    # Only render if we're actually on the HTTP logs tab
+    if st.session_state.render_api_responses:
+        _render_api_response(request, response, response_id, tab)
 
 
 def _tool_output_callback(
@@ -435,6 +558,7 @@ def _tool_output_callback(
     _render_message(Sender.TOOL, tool_output)
 
 
+# @time_decorator
 def _render_api_response(
     request: httpx.Request,
     response: httpx.Response | object | None,
@@ -474,12 +598,18 @@ def _render_error(error: Exception):
     st.error(f"**{error.__class__.__name__}**\n\n{body}", icon=":material/error:")
 
 
+# @time_decorator
 def _render_message(
     sender: Sender,
     message: str | BetaContentBlockParam | ToolResult,
 ):
     """Convert input from the user or output from the agent to a streamlit message."""
-    # streamlit's hotreloading breaks isinstance checks, so we need to check for class names
+
+    # @st.cache_data(show_spinner=False)
+    # def render_cached_message(sender, message_hash, message):
+    #     with st.chat_message(sender):
+
+    # # streamlit's hotreloading breaks isinstance checks, so we need to check for class names
     is_tool_result = not isinstance(message, str | dict)
     if not message or (
         is_tool_result
@@ -510,6 +640,63 @@ def _render_message(
                 raise Exception(f'Unexpected response type {message["type"]}')
         else:
             st.markdown(message)
+
+    # @st.cache_data(show_spinner=False)
+    # def render_cached_message(sender, message_hash, message):
+    #     with st.chat_message(sender):
+    #         if is_tool_result:
+    #             message = cast(ToolResult, message)
+    #             if message.output:
+    #                 if message.__class__.__name__ == "CLIResult":
+    #                     st.code(message.output)
+    #                 else:
+    #                     st.markdown(message.output)
+    #             if message.error:
+    #                 st.error(message.error)
+    #             if message.base64_image and not st.session_state.hide_images:
+    #                 st.image(base64.b64decode(message.base64_image))
+    #         elif isinstance(message, dict):
+    #             if message["type"] == "text":
+    #                 st.write(message["text"])
+    #             elif message["type"] == "tool_use":
+    #                 st.code(f'Tool Use: {message["name"]}\nInput: {message["input"]}')
+    #             else:
+    #                 # only expected return types are text and tool_use
+    #                 raise Exception(f'Unexpected response type {message["type"]}')
+    #         else:
+    #             st.markdown(message)
+    #     # Create a hash of the message content for caching
+    # message_hash = hash(str(message))
+    # render_cached_message(sender, message_hash, message)
+
+
+def get_saved_states() -> list[str]:
+    """Get list of all saved state files"""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    files = glob.glob(str(CONFIG_DIR / "state_*.json"))
+    return sorted([Path(f).stem.replace("state_", "") for f in files])
+
+
+def load_state_with_name(name: str) -> bool:
+    """Load a specific named state"""
+    data = load_from_storage_json(f"state_{name}")
+    if data and isinstance(data, dict):  # Type guard to help pyright
+        st.session_state["messages"] = data["messages"]
+        tools_data = data.get("tools", {})
+        st.session_state["tools"] = {
+            tool_id: ToolResult(
+                output=tool_data.get("output"),
+                error=tool_data.get("error"),
+                base64_image=tool_data.get("base64_image"),
+                system=tool_data.get("system"),
+            )
+            for tool_id, tool_data in tools_data.items()
+        }
+        st.session_state["last_saved_timestamp"] = datetime.fromisoformat(
+            data["timestamp"]
+        )
+        return True
+    return False
 
 
 if __name__ == "__main__":

@@ -83,6 +83,7 @@ async def sampling_loop(
     ],
     api_key: str,
     only_n_most_recent_images: int | None = None,
+    only_n_most_recent_messages: int | None = None,
     max_tokens: int = 4096,
 ):
     """
@@ -97,6 +98,9 @@ async def sampling_loop(
         type="text",
         text=f"{SYSTEM_PROMPT}{' ' + system_prompt_suffix if system_prompt_suffix else ''}",
     )
+
+    if only_n_most_recent_messages == -1:
+        only_n_most_recent_messages = None
 
     while True:
         enable_prompt_caching = False
@@ -117,6 +121,14 @@ async def sampling_loop(
             # ever sensible to break the cache by truncating images
             only_n_most_recent_images = 0
             system["cache_control"] = {"type": "ephemeral"}
+
+        # if only_n_most_recent_messages:
+        #     messages = messages[-only_n_most_recent_messages:]
+        #     # find the first message with no tool results
+        #     for message in messages:
+        #         if not any(isinstance(item, dict) and item.get("type") == "tool_result" for item in message["content"]):
+        #             break
+        #     messages = messages[:messages.index(message)]
 
         if only_n_most_recent_images:
             _maybe_filter_to_n_most_recent_images(
