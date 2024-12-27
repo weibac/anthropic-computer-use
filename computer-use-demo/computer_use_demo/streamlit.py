@@ -310,23 +310,6 @@ async def main():
             except Exception as e:
                 st.error(f"Error saving state: {str(e)}")
 
-        if st.button(
-            "Save text log",
-            type="secondary",
-            key="save_text_log_button",
-        ):
-            try:
-                filename = f"text_log_{datetime.now().isoformat()}.txt"
-                with st.spinner("Saving text log..."):
-                    log = "".join(
-                        get_message_text(message["role"], message)
-                        for message in st.session_state.messages
-                    )
-                    save_to_storage(filename, log)
-                st.success(f"Saved text log as '{filename}'!")
-            except Exception as e:
-                st.error(f"Error saving text log: {str(e)}")
-
         # Load existing state
         saved_states = get_saved_states()
         if saved_states:
@@ -365,6 +348,23 @@ async def main():
                 subprocess.run("pkill Xvfb; pkill tint2", shell=True)  # noqa: ASYNC221
                 await asyncio.sleep(1)
                 subprocess.run("./start_all.sh", shell=True)  # noqa: ASYNC221
+
+        if st.button(
+            "Save text log",
+            type="secondary",
+            key="save_text_log_button",
+        ):
+            try:
+                filename = f"text_log_{datetime.now().isoformat()}.txt"
+                with st.spinner("Saving text log..."):
+                    log = "".join(
+                        get_message_text(message["role"], message)
+                        for message in st.session_state.messages
+                    )
+                    save_to_storage(filename, log)
+                st.success(f"Saved text log as '{filename}'!")
+            except Exception as e:
+                st.error(f"Error saving text log: {str(e)}")
 
     if not st.session_state.auth_validated:
         if auth_error := validate_auth(
@@ -413,6 +413,7 @@ async def main():
             for identity, (request, response) in st.session_state.responses.items():
                 _render_api_response(request, response, identity, http_logs)
 
+        cont = False
         if new_message:
             if new_message == "/log":
                 log = "".join(
@@ -421,23 +422,26 @@ async def main():
                 )
                 logger.info(log)
                 return
-            st.session_state.messages.append(
-                {
-                    "role": Sender.USER,
-                    "content": [
-                        *maybe_add_interruption_blocks(),
-                        BetaTextBlockParam(type="text", text=new_message),
-                    ],
-                }
-            )
-            _render_message(Sender.USER, new_message)
+            elif new_message == "/cont":
+                cont = True
+            else:
+                st.session_state.messages.append(
+                    {
+                        "role": Sender.USER,
+                        "content": [
+                            *maybe_add_interruption_blocks(),
+                            BetaTextBlockParam(type="text", text=new_message),
+                        ],
+                    }
+                )
+                _render_message(Sender.USER, new_message)
 
         try:
             most_recent_message = st.session_state["messages"][-1]
         except IndexError:
             return
 
-        if most_recent_message["role"] is not Sender.USER:
+        if not cont and most_recent_message["role"] is not Sender.USER:
             # we don't have a user message to respond to, exit early
             return
 
@@ -462,6 +466,7 @@ async def main():
                 only_n_most_recent_images=st.session_state.only_n_most_recent_images,
                 prompt_caching=st.session_state.prompt_caching,
                 only_n_most_recent_messages=st.session_state.only_n_most_recent_messages,
+                # logger=logger,
             )
 
 
