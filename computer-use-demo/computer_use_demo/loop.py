@@ -140,6 +140,9 @@ async def sampling_loop(
         # we use raw_response to provide debug information to streamlit. Your
         # implementation may be able call the SDK directly with:
         # `response = client.messages.create(...)` instead.
+
+        # if logger:
+        #     logger.info(f"Calling API with messages: {messages_copy[0:2]}")
         try:
             raw_response = client.beta.messages.with_raw_response.create(
                 max_tokens=max_tokens,
@@ -187,8 +190,6 @@ async def sampling_loop(
             return messages
 
         messages.append({"content": tool_result_content, "role": "user"})
-
-        return messages
 
 
 def _maybe_filter_to_n_most_recent_images(
