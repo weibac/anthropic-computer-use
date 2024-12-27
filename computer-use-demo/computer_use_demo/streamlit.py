@@ -6,6 +6,7 @@ import asyncio
 import base64
 import cProfile
 import glob
+import json
 import logging
 import os
 import pstats
@@ -158,9 +159,9 @@ def setup_state():
     if "prompt_caching" not in st.session_state:
         st.session_state.prompt_caching = False
     if "only_n_most_recent_images" not in st.session_state:
-        st.session_state.only_n_most_recent_images = 3
+        st.session_state.only_n_most_recent_images = 5
     if "only_n_most_recent_messages" not in st.session_state:
-        st.session_state.only_n_most_recent_messages = 500
+        st.session_state.only_n_most_recent_messages = 1000
     if "visible_messages" not in st.session_state:
         st.session_state.visible_messages = 20
     if "custom_system_prompt" not in st.session_state:
@@ -181,7 +182,7 @@ def _reset_model():
 
 def is_message_visible(idx: int, total_messages: int) -> bool:
     """Show only the most recent N messages"""
-    if st.session_state.visible_messages == -1:
+    if st.session_state.visible_messages == 0:
         return True
     return idx >= (total_messages - st.session_state.visible_messages)
 
@@ -246,24 +247,31 @@ async def main():
             disabled=st.session_state.provider == APIProvider.ANTHROPIC
             and st.session_state.prompt_caching,
         )
-        # st.number_input(
-        #     "Only send N most recent messages",
-        #     min_value=-1,
-        #     key="only_n_most_recent_messages",
-        #     help="To decrease the total tokens sent, remove older messages from the conversation",
-        # )
+        st.number_input(
+            "Only send N most recent messages",
+            min_value=0,
+            max_value=1000,
+            key="only_n_most_recent_messages",
+            help="To decrease the total tokens sent, remove older messages from the conversation. Only available if prompt caching is disabled.",
+            disabled=st.session_state.provider == APIProvider.ANTHROPIC
+            and st.session_state.prompt_caching,
+        )
         st.number_input(
             "Only render N most recent messages",
-            min_value=-1,
+            min_value=0,
             key="visible_messages",
-            help="Only show the most recent N messages in the chat to decrease render time. Set to -1 to show all messages.",
+            help="Only show the most recent N messages in the UI to decrease render time. Does not affect context sent to the model. Set to 0 to show all messages.",
         )
         st.checkbox(
             "Render API Responses",
             key="render_api_responses",
             help="Render the API responses in the HTTP Exchange Logs tab (this is slow)",
         )
-        st.checkbox("Hide screenshots", key="hide_images")
+        st.checkbox(
+            "Hide screenshots",
+            key="hide_images",
+            help="Hide screenshots from the UI. Does not affect context sent to the model.",
+        )
 
         st.divider()  # Add visual separation
 
@@ -301,6 +309,23 @@ async def main():
                 st.success(f"Saved as '{new_state_name}'!")
             except Exception as e:
                 st.error(f"Error saving state: {str(e)}")
+
+        if st.button(
+            "Save text log",
+            type="secondary",
+            key="save_text_log_button",
+        ):
+            try:
+                filename = f"text_log_{datetime.now().isoformat()}.txt"
+                with st.spinner("Saving text log..."):
+                    log = "".join(
+                        get_message_text(message["role"], message)
+                        for message in st.session_state.messages
+                    )
+                    save_to_storage(filename, log)
+                st.success(f"Saved text log as '{filename}'!")
+            except Exception as e:
+                st.error(f"Error saving text log: {str(e)}")
 
         # Load existing state
         saved_states = get_saved_states()
@@ -374,7 +399,7 @@ async def main():
                             _render_message(
                                 Sender.TOOL,
                                 st.session_state.tools[block["tool_use_id"]],
-                                index,
+                                block["tool_use_id"],
                             )
                         else:
                             _render_message(
@@ -389,6 +414,13 @@ async def main():
                 _render_api_response(request, response, identity, http_logs)
 
         if new_message:
+            if new_message == "/log":
+                log = "".join(
+                    get_message_text(message["role"], message)
+                    for message in st.session_state.messages
+                )
+                logger.info(log)
+                return
             st.session_state.messages.append(
                 {
                     "role": Sender.USER,
@@ -429,7 +461,7 @@ async def main():
                 api_key=st.session_state.api_key,
                 only_n_most_recent_images=st.session_state.only_n_most_recent_images,
                 prompt_caching=st.session_state.prompt_caching,
-                # only_n_most_recent_messages=st.session_state.only_n_most_recent_messages,
+                only_n_most_recent_messages=st.session_state.only_n_most_recent_messages,
             )
 
 
@@ -556,7 +588,6 @@ def _api_response_callback(
     response_state[response_id] = (request, response)
     if error:
         _render_error(error)
-    # Only render if we're actually on the HTTP logs tab
     if st.session_state.render_api_responses:
         _render_api_response(request, response, response_id, tab)
 
@@ -627,6 +658,7 @@ def _render_message(
     ):
         return
     show_rewind_button = False
+
     with st.chat_message(sender):
         if is_tool_result:
             message = cast(ToolResult, message)
@@ -639,6 +671,7 @@ def _render_message(
                 st.error(message.error)
             if message.base64_image and not st.session_state.hide_images:
                 st.image(base64.b64decode(message.base64_image))
+            show_rewind_button = True
         elif isinstance(message, dict):
             if message["type"] == "text":
                 st.write(message["text"])
@@ -671,6 +704,65 @@ def _render_message(
                 )
             }
             st.rerun()
+
+
+def message_text(
+    sender: str,
+    content: str,
+    message_type: str = "message",
+    tool_use_id: str | None = None,
+) -> str:
+    text = f"[{sender}](#{message_type})"
+    # if tool_use_id:
+    #     text += f'<{tool_use_id}>'
+    text += "\n"
+    text += content
+    text += "\n\n"
+    return text
+
+
+def get_message_text(
+    role: str,
+    message,
+    message_type: str = "message",
+    tool_use_id: str | None = None,
+) -> str:
+    message_content = "[empty]"
+    if isinstance(message, list):
+        return "".join(
+            get_message_text(role, block, message_type, tool_use_id)
+            for block in message
+        )
+    if isinstance(message, str):
+        message_content = message
+    else:
+        if "type" in message:
+            if message["type"] == "text":
+                message_content = message["text"]
+            elif message["type"] == "image":
+                message_type = "image"
+                message_content = f"{tool_use_id}.png"
+            elif message["type"] == "tool_use":
+                message_type = "tool_use"
+                message_content = (
+                    f'{message["name"]}({json.dumps(message["input"], indent=2)})'
+                )
+                tool_use_id = message["id"]
+            elif message["type"] == "tool_result":
+                tool_use_id = message["tool_use_id"]
+                role = "tool_result"
+                if message["is_error"]:
+                    message_type = "error"
+                else:
+                    message_type = "output"
+                return get_message_text(
+                    role, message["content"], message_type, tool_use_id
+                )
+
+        if message.get("content"):
+            return get_message_text(role, message["content"], message_type, tool_use_id)
+
+    return message_text(role, message_content, message_type, tool_use_id)
 
 
 def get_saved_states() -> list[str]:

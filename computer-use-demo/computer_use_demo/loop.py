@@ -83,7 +83,7 @@ async def sampling_loop(
     ],
     api_key: str,
     only_n_most_recent_images: int | None = None,
-    # only_n_most_recent_messages: int | None = None,
+    only_n_most_recent_messages: int | None = None,
     prompt_caching: bool = False,
     max_tokens: int = 4096,
 ):
@@ -119,13 +119,19 @@ async def sampling_loop(
             # Because cached reads are 10% of the price, we don't think it's
             # ever sensible to break the cache by truncating images
             only_n_most_recent_images = 0
+            only_n_most_recent_messages = 0
             system["cache_control"] = {"type": "ephemeral"}
         else:
             _remove_prompt_caching(messages)
 
+        messages_copy = messages.copy()
+
+        if only_n_most_recent_messages:
+            messages_copy = messages_copy[-only_n_most_recent_messages:]
+
         if only_n_most_recent_images:
             _maybe_filter_to_n_most_recent_images(
-                messages,
+                messages_copy,
                 only_n_most_recent_images,
                 min_removal_threshold=image_truncation_threshold,
             )
@@ -137,7 +143,7 @@ async def sampling_loop(
         try:
             raw_response = client.beta.messages.with_raw_response.create(
                 max_tokens=max_tokens,
-                messages=messages,
+                messages=messages_copy,
                 model=model,
                 system=[system],
                 tools=tool_collection.to_params(),
@@ -181,6 +187,8 @@ async def sampling_loop(
             return messages
 
         messages.append({"content": tool_result_content, "role": "user"})
+
+        return messages
 
 
 def _maybe_filter_to_n_most_recent_images(
