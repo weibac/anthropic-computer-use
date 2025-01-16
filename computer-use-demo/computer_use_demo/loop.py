@@ -83,6 +83,8 @@ async def sampling_loop(
     ],
     api_key: str,
     only_n_most_recent_images: int | None = None,
+    only_n_most_recent_messages: int | None = None,
+    prompt_caching: bool = False,
     max_tokens: int = 4096,
 ):
     """
@@ -104,7 +106,8 @@ async def sampling_loop(
         image_truncation_threshold = only_n_most_recent_images or 0
         if provider == APIProvider.ANTHROPIC:
             client = Anthropic(api_key=api_key, max_retries=4)
-            enable_prompt_caching = True
+            if prompt_caching:
+                enable_prompt_caching = True
         elif provider == APIProvider.VERTEX:
             client = AnthropicVertex()
         elif provider == APIProvider.BEDROCK:
@@ -116,11 +119,19 @@ async def sampling_loop(
             # Because cached reads are 10% of the price, we don't think it's
             # ever sensible to break the cache by truncating images
             only_n_most_recent_images = 0
+            only_n_most_recent_messages = 0
             system["cache_control"] = {"type": "ephemeral"}
+        else:
+            _remove_prompt_caching(messages)
+
+        messages_copy = messages.copy()
+
+        if only_n_most_recent_messages:
+            messages_copy = messages_copy[-only_n_most_recent_messages:]
 
         if only_n_most_recent_images:
             _maybe_filter_to_n_most_recent_images(
-                messages,
+                messages_copy,
                 only_n_most_recent_images,
                 min_removal_threshold=image_truncation_threshold,
             )
@@ -129,10 +140,13 @@ async def sampling_loop(
         # we use raw_response to provide debug information to streamlit. Your
         # implementation may be able call the SDK directly with:
         # `response = client.messages.create(...)` instead.
+
+        # if logger:
+        #     logger.info(f"Calling API with messages: {messages_copy[0:2]}")
         try:
             raw_response = client.beta.messages.with_raw_response.create(
                 max_tokens=max_tokens,
-                messages=messages,
+                messages=messages_copy,
                 model=model,
                 system=[system],
                 tools=tool_collection.to_params(),
@@ -261,6 +275,16 @@ def _inject_prompt_caching(
                 content[-1].pop("cache_control", None)
                 # we'll only every have one extra turn per loop
                 break
+
+
+def _remove_prompt_caching(
+    messages: list[BetaMessageParam],
+):
+    for message in messages:
+        if message["role"] == "user" and isinstance(
+            content := message["content"], list
+        ):
+            content[-1].pop("cache_control", None)
 
 
 def _make_api_tool_result(
